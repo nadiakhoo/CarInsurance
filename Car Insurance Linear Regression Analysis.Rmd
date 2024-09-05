@@ -1,0 +1,346 @@
+---
+title: "Car Insurance Analysis"
+author: "Nadia Khoo"
+date: "2024-09-04"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE)
+```
+
+### Introduction
+
+The data I am working with is sourced from Allstate Indemnity Company’s Private Passenger Automobile Maryland insurance dataset 2020. Obtained from Kaggle dataset: https://www.kaggle.com/datasets/thedevastator/insurance-companies-secret-sauce-finally-exposed?select=cgr-premiums-table.csv
+
+It contains car insurance data with columns:  
+`territory` - territory the individual lives in  
+`gender` - gender of individual  
+`birthdate` - individual's birthdate  
+`ypc` - individual's years of prior coverage  
+`current_premium` - individual's current premium, what is being paid  
+`indicated _premium` - individual's indicated suggested by model premium  
+`selected _premium` - individual's selected by insurer premium  
+`underlying _premium` - individual's underlying base amount before adjustment premium  
+`fixed_expenses` - individual's fixed expenses  
+`underlying_total_premium` - individual's underlying total premium including adjustments  
+`cgr` - individual's CGR
+`cgr_factor` - individual's CGR factor, risk of claims  
+
+I approach this dataset with the question: *How does different factors such as age, gender, living areas, etc., affect the premium charged to policyholders?*   
+
+I think that current premium which is the variable `current_premium` would be the best use choice as it reflects the actual amounts individuals are paying for their insurance premiums. Hence,I will be dropping all other premium variables
+
+### Loading in libraries and dataset
+
+```{r}
+library(googledrive)
+library(tidyverse)
+library(ggplot2)
+library(lubridate)
+library(patchwork)
+library(olsrr)
+library(car)
+```
+
+
+```{r}
+# downloading zip csv data from Google Drive
+temp = tempfile(fileext = ".zip")
+
+dl = drive_download(
+  as_id("1fzpzgte8p3z_LJ7dLD4Xzmj5Rv5D1cQe"), path = temp, overwrite = TRUE
+)
+
+out = unzip(temp, exdir = tempdir())
+
+df = read.csv(out[1], sep = ",")
+```
+
+### Cleaning dataset
+
+```{r}
+# taking a look at the original data
+head(df)
+```
+
+```{r}
+# Removing unnecessary variables indicated_premium, selected_premium,
+# underlying_premium, underlying_total_premium, fixed_expenses and cgr
+df1 = df %>%
+  select(-indicated_premium, -selected_premium, -underlying_premium,
+         -underlying_total_premium, -fixed_expenses, -cgr)
+
+head(df1)
+```
+
+```{r}
+# changing gender to factor
+
+df2 = df1%>%
+  mutate(gender = as.factor(gender), 
+         birthdate = mdy(birthdate), 
+         territory = as.factor(territory)) %>%
+  mutate(age = interval(birthdate, today()) / years(1)) %>%
+  mutate(age = floor(age)) %>%
+  select(-birthdate) %>%
+  select(current_premium, everything())
+
+head(df2)
+```
+
+### Correlation between variables
+
+```{r}
+# current_premium vs ypc
+ypc_xy = ggplot(df2, aes(x = ypc, y = current_premium)) +
+  geom_smooth(method = "lm") +
+  labs(x = "Years of Prior Coverage",
+       y = "Premium") +
+  theme_minimal()
+
+# current_premium vs cgr_factor
+cgr_xy = ggplot(df2, aes(x = cgr_factor, y = current_premium)) +
+  geom_smooth(method = "lm") +
+  labs(x = "CGR Factor",
+       y = "Premium") +
+  theme_minimal()
+
+# current_premium vs age
+age_xy = ggplot(df2, aes(x = age, y = current_premium)) +
+  geom_smooth(method = "lm") +
+  labs(x = "Age",
+       y = "Premium") +
+  theme_minimal()
+
+(ypc_xy + cgr_xy + age_xy) +
+  plot_annotation(title = "Scatter Plots of Premiums vs YPC, CGR and Age")
+
+# Since there is a general positive or negative linear correlation between
+# premiums and the 3 numerical variables, will keep all 3 variables for now
+```
+
+### Simplifying datasets
+
+```{r}
+# territory has too many factors
+# reduce number of categories for territory to top 4, based on count of entries
+territory_top4 = df2 %>%
+  count(territory, sort = TRUE) %>%
+  head(5)
+
+territory_top4_names = territory_top4$territory
+
+df3 = df2 %>%
+  filter(territory %in% territory_top4_names)
+
+head(df3)
+```
+
+### Linear regression modelling
+
+```{r}
+# model 1 with all variables
+model_1 = lm(current_premium ~ territory + gender + ypc + cgr_factor + age, data = df3)
+summary_1 = summary(model_1)
+summary_1
+
+# AIC and BIC
+AIC(model_1)
+BIC(model_1)
+```
+```{r}
+qqnorm(residuals(model_1))
+qqline(residuals(model_1), col = "red")
+```
+
+```{r}
+# removing territory1215 as p-value > 0.05
+df4 = df3 %>%
+  filter(territory != "1215")
+
+head(df4)
+```
+
+
+```{r}
+model_2 = lm(current_premium ~ territory + gender + ypc + cgr_factor, data = df4)
+summary_2 = summary(model_2)
+summary_2
+
+# AIC and BIC
+AIC(model_2)
+BIC(model_2)
+
+# adjusted R squared decreases slightly for model_2
+# qq plots are similar with slight deviation from normality 
+# (removed as no comparison insights)
+# however AIC and BIC is significantly smaller for model_2
+# hence will keep model_2 as a better fit
+```
+
+
+### Addition of interactive terms
+
+```{r}
+# analysed variables and gathered possible interactions between variables
+# adding interactive terms gender*cgr_factor, ypc*gender, 
+# territory*age and territory*cgr_factor
+model_3 = lm(current_premium ~ territory + gender + ypc + cgr_factor 
+             + gender*cgr_factor +  ypc*gender + territory*age + territory*cgr_factor
+             , data = df4)
+summary_3 = summary(model_3)
+summary_3
+
+# AIC and BIC
+AIC(model_3)
+BIC(model_3)
+
+# some interactive terms have p-value > 0.05
+
+# will make an educated decision to exclude gender*cgr_factor interaction 
+# as it has high p-value and will not improve the model significantly
+# also removing territory1234 as its term and interactions have high p-values > 0.05
+
+# age has p-value < 0.05 and will be kept back into model
+
+# AIC and BIC decreased and increased slightly respectively, will continue to monitor
+
+# overall the adjusted p-value increased which is an improvement
+```
+```{r}
+# removing territory1234 as p-value > 0.05
+df5 = df4 %>%
+  filter(territory != "1234")
+
+head(df5)
+```
+
+
+```{r}
+model_4 = lm(current_premium ~ territory + ypc + cgr_factor + gender
+             + ypc*gender + territory * age + territory*cgr_factor
+             , data = df5)
+summary_4 = summary(model_4)
+summary_4
+
+# AIC and BIC
+AIC(model_4)
+BIC(model_4)
+
+# adjusted r-squared value has increased
+# AIC and BIC has decreased significantly
+# overall, model has improved
+```
+### Checking for normality
+
+```{r}
+residuals_model_1 = residuals(model_1)
+residuals_model_4 = residuals(model_4)
+
+qq_model_1 = ggplot(data = data.frame(residuals = residuals_model_1), 
+                    aes(sample = residuals)) +
+  stat_qq() +
+  stat_qq_line() +
+  labs(title = "qq plot for initial model 1",
+       x = "theoretical",
+       y = "sample")
+
+qq_model_4 = ggplot(data = data.frame(residuals = residuals_model_4), 
+                    aes(sample = residuals)) +
+  stat_qq() +
+  stat_qq_line() +
+  labs(title = "qq plot for model 4",
+       x = "theoretical",
+       y = "sample")
+
+combined_qqs = qq_model_1 + qq_model_4 +
+  plot_annotation(title = "Before and after qq plots")
+
+combined_qqs
+# quite similar, some deviation from normal line
+# transformation of response variable premiums may improve normality
+```
+
+
+```{r}
+df5$transformed_response = log(df5$current_premium)
+model_5 <- lm(transformed_response ~ territory + ypc + cgr_factor + gender
+             + ypc*gender + territory * age + territory*cgr_factor, data = df5)
+
+qqnorm(residuals(model_5))
+qqline(residuals(model_5))
+# for majority off plot, has improved normality
+# except for left tail that is lower than normal line
+```
+```{r}
+summary(model_5)
+# however, adjusted r square has decreased significantly
+# might not be best method to improve normality
+```
+
+### Checking for outliers
+
+```{r}
+# cook's distance to check for influence points
+plot(cooks.distance(model_5))
+abline(h = 4 / length(df5$transformed_response), col = "red")
+# does not show extreme influence points in model data 
+```
+
+### Checking for homoscedasticity
+
+```{r}
+# residuals vs fitted plot
+plot(fitted(model_4), residuals(model_4),
+     xlab = "fitted values",
+     ylab = "residuals",
+     main = "residuals vs fitted")
+abline(h = 0, col = "red")
+
+# does not show signs of deviating from homoscedasticity
+```
+
+### Checking for multicollinearity 
+
+```{r}
+# vif(model_4)
+vif(model_4, type = "predictor")
+
+# shows high collinearity for cgr_factor and age
+```
+
+```{r}
+# scaling age and cgr_factor to fix collinearity
+df6 = df5
+df6$age = scale(df6$age, center = TRUE, scale = FALSE)
+df6$cgr_factor = scale(df6$cgr_factor, center = TRUE, scale = FALSE)
+
+model_6 = lm(current_premium ~ territory + ypc + cgr_factor + gender
+             + ypc*gender + territory * age + territory*cgr_factor
+             , data = df6)
+```
+
+```{r}
+vif(model_6, type = "predictor")
+
+# improved collinearity issue, gvif values are smaller now
+```
+```{r}
+summary(model_6)
+
+# AIC and BIC
+AIC(model_4)
+BIC(model_4)
+```
+From the coefficients of the final model, significant variables are `territory`, `ypc`, and the interactive variables between `territory` and `age`/`cgr_factor`.   
+  
+For instance, individuals living in `territory1206` are expected to pay \$197 more in premium, which could be due to the location being more prone to car accidents due to poor traffic.  
+  
+Whereas for `ypc`, for each year of an individual's years of prior coverage they are expected to pay \$37 less in premium, likely as they have proven to be reliable and less likely to be at risk of car accidents from their history.  
+  
+Model has improved AIC from 100919.3 to 57689.78 and BIC from 100987 to 57770.52 which is a significant improvement from initial model with all variables. Adjusted r-squared has also improved from 0.03323 to 0.04439.  
+  
+*Final thoughts*: If I were to do it again, I would definitely try to transform the response variable from the start, since it deviated from normality at the extremes. With that, the model may have fit better and the variables chosen in the model may have changes. Just something I've learnt which is the order in which I should take to output more optimal results! :)  
